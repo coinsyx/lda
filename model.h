@@ -23,9 +23,11 @@ typedef pair<int, double> TopicCountPair;
 
 struct Document
 {
+    vector<string> _string_document;
     vector<int> _document;
     vector<int> _topic;
     TopicCountDist _topic_dist;    
+    vector<string> _unknown_word;
     string document_output_string()
     {
         string output;
@@ -154,22 +156,16 @@ public:
     : _model(model_file), _alpha(alpha), _beta(beta)
     {    _num_topic = _model.GetTopicNum(); }
 
-    void Infer(const vector<string>& string_doc, int max_iter, vector<pair<string, int> >* word_topic)
+    //void Infer(const vector<string>& string_doc, int max_iter, vector<pair<string, int> >* word_topic)
+    void Infer(const vector<string>& string_doc, int max_iter, Document* doc)
     {
-        Document doc;
-        InitTopicAssignment(string_doc, &doc);
+        //Document doc;
+        InitTopicAssignment(string_doc, doc);
+        if (doc->_document.size() == 0)  return;
+
         for (int iter = 0; iter < max_iter; ++iter)
         {
-            UpdateTopicForDocument(&doc);
-        }
-
-        Model::ID2WordDict* id2word_dict = _model.GetID2WordDict();
-        for (size_t i=0; i<doc._document.size(); ++i)
-        {
-            int word_id = doc._document[i];
-            int topic_id = doc._topic[i];
-            string word = (*id2word_dict)[word_id]; 
-            word_topic->push_back(pair<string, int>(word, topic_id));
+            UpdateTopicForDocument(doc);
         }
     }
 
@@ -191,14 +187,15 @@ private:
             //LOG(INFO)<<"word "<<doc->_document[i]<<" sampled topic is "<<sampled_topic<<endl;
             // update topic assignment
             doc->_topic[i] = sampled_topic;
-            if (doc->_topic_dist.find(sampled_topic) == doc->_topic_dist.end())
+            TopicCountDist& topic_dist = doc->_topic_dist;
+            if (topic_dist.find(sampled_topic) == topic_dist.end())
             {
-                doc->_topic_dist[sampled_topic] = 1;
+                topic_dist[sampled_topic] = 1;
             }
             else {
-                doc->_topic_dist[sampled_topic] += 1;
+                topic_dist[sampled_topic] += 1;
             }
-            doc->_topic_dist[old_topic_id] -= 1;
+            topic_dist[old_topic_id] -= 1;
         }
     }
 
@@ -218,8 +215,9 @@ private:
            double p_w_z = topic_count / topic_total_count;
 
            double adjust = topic_id == old_topic_id ? 1 : 0;
-           double doc_topic_count = doc->_topic_dist.find(topic_id) != doc->_topic_dist.end()\
-                                    ? doc->_topic_dist[topic_id] : 0.0;  
+           TopicCountDist& topic_dist = doc->_topic_dist;
+           double doc_topic_count = topic_dist.find(topic_id) != topic_dist.end()\
+                                    ? topic_dist[topic_id] : 0.0;  
            doc_topic_count -= adjust;
            
            (*topic_count_dist)[topic_id] = p_w_z * (doc_topic_count + _alpha);
@@ -245,9 +243,13 @@ private:
     {
         for (size_t i = 0; i < string_doc.size(); ++i)
         {
-
             Model::Word2IDDict* p_word2id_dict = _model.GetWord2IDDict();
-            if (p_word2id_dict->find(string_doc[i]) == p_word2id_dict->end()) continue;
+            if (p_word2id_dict->find(string_doc[i]) == p_word2id_dict->end())
+            {
+                doc->_unknown_word.push_back(string_doc[i]);
+                continue;
+            }
+            doc->_string_document.push_back(string_doc[i]);
             int word_id = (*p_word2id_dict)[string_doc[i]];
             doc->_document.push_back(word_id);
             int random_topic = static_cast<int>( rand() / static_cast<double>(RAND_MAX) * _num_topic);
@@ -284,7 +286,7 @@ public:
             int topic_id;
             ss >> topic_id;
             if (topic2word_size <= topic_id) {
-                _topic2word.resize(topic2word_size);
+                _topic2word.resize(topic2word_size * 2);
                 topic2word_size = _topic2word.size();
             }
             
@@ -303,25 +305,29 @@ public:
             for (size_t i = 0; i<_topic2word[topic_id].size(); ++i)
                 _topic2word[topic_id][i].second /= total_count;
         }
-
     }
 
     void ExtendQuery(const vector<string>& tokens, unordered_map<string, double>* extended_query)
     {
-        vector<pair<string, int> > word_topic;
-        _infer.Infer(tokens, 20, &word_topic);
-        int sz = word_topic.size();
-        TopicCountDist topic_dist;
+        Document doc;
+        _infer.Infer(tokens, 20, &doc);
+
+        // get topic word distribution 
+        TopicCountDist topic_dist;  
+        int sz = doc._document.size();
         for (size_t i=0; i<sz; ++i)
         {
-            int topic_id = word_topic[i].second;
+            int topic_id = doc._topic[i];
             if (topic_dist.find(topic_id) == topic_dist.end())
                 topic_dist[topic_id] = 1.0/sz;
             else
                 topic_dist[topic_id] += 1.0/sz;
-            cout<<word_topic[i].first<<":"<<word_topic[i].second<<endl;
         }
 
+
+        double topic_dist_weight = 0.5;
+
+        // extend query
         for (TopicCountDist::iterator iter = topic_dist.begin();
              iter != topic_dist.end();
              ++iter)
@@ -333,13 +339,24 @@ public:
             int topic_word_size = one_topic.size();
             for (size_t i=0; i<topic_word_size; ++i)
             {
-                string word = one_topic[i].first;
+                const string& word = one_topic[i].first;
                 double prob_topic2word = one_topic[i].second;
                 if (extended_query->find(word) == extended_query->end())
-                    (*extended_query)[word] = prob_topic * prob_topic2word;
+                    (*extended_query)[word] = prob_topic * prob_topic2word * topic_dist_weight;
                 else
-                    (*extended_query)[word] += prob_topic * prob_topic2word;
+                    (*extended_query)[word] += prob_topic * prob_topic2word * topic_dist_weight;
             }
+        }
+
+        // modify orignal query weight
+        sz = tokens.size();
+        for (size_t i=0; i<sz; ++i)
+        {
+            const string& word = tokens[i];
+            if (extended_query->find(word) == extended_query->end())
+                (*extended_query)[word] = 1.0 / sz * (1-topic_dist_weight); 
+            else
+                (*extended_query)[word] += 1.0 / sz * (1-topic_dist_weight);
         }
     }
 
