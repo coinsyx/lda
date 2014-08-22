@@ -23,12 +23,12 @@ typedef pair<int, double> TopicCountPair;
 
 
 template<typename KeyType>
-inline void IncreaseKeyCount(unordered_map<KeyType, double>* topic_dist, KeyType topic_id, double count)
+inline void IncreaseKeyCount(unordered_map<KeyType, double>* hashmap, KeyType key, double value)
 {
-    if (topic_dist->find(topic_id) != topic_dist->end())
-        (*topic_dist)[topic_id] += count;
+    if (hashmap->find(key) != hashmap->end())
+        (*hashmap)[key] += value;
     else
-        (*topic_dist)[topic_id] = count;
+        (*hashmap)[key] = value;
 }
 
 struct Document
@@ -45,7 +45,6 @@ class Model {
 public:
     typedef unordered_map<int, TopicCountDist* >  WordTopicCountDist;
     typedef unordered_map<string, int> Word2IDDict;
-    typedef unordered_map<int, string> ID2WordDict;
     
     Model (const string& model_file)
     {
@@ -147,6 +146,8 @@ public:
         InitTopicAssignment(string_doc, doc);
         if (doc->_document.size() == 0)  return;
 
+        int accumulate_count = _max_iter - _burnin_iter;
+        int doc_len = doc->_document.size();
         TopicCountDist& accumulate_topic_dist = doc->_accumulate_topic_dist;
         for (int n = 0; n < _max_iter; ++n)
         {
@@ -158,17 +159,12 @@ public:
                      iter != doc->_topic_dist.end();
                      ++iter)
                 {
-                    IncreaseKeyCount(&(doc->_accumulate_topic_dist), iter->first, iter->second);
+                    IncreaseKeyCount(&(doc->_accumulate_topic_dist), 
+                                     iter->first, 
+                                     iter->second/ (accumulate_count*doc_len));
                 }
             }
         }
-
-        int accumulate_count = _max_iter - _burnin_iter;
-        int doc_len = doc->_document.size();
-        for (TopicCountDist::iterator iter = accumulate_topic_dist.begin();
-             iter != accumulate_topic_dist.end();
-             ++iter)
-            iter->second /= (accumulate_count * doc_len);
     }
 
 private:
@@ -243,10 +239,6 @@ private:
             doc->_topic.push_back(random_topic);
 
             IncreaseKeyCount(&(doc->_topic_dist), random_topic, 1);
-            //if (doc->_topic_dist.find(random_topic) == doc->_topic_dist.end())
-            //    doc->_topic_dist[random_topic] = 1.0;
-            //else
-            //    doc->_topic_dist[random_topic] ++;
         }
     }
 
