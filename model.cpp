@@ -15,6 +15,23 @@ ostream& operator<<(ostream& out, vector<pair<string, double> >& v)
     return out;
 }
 
+#define rdtsc(low,high) __asm__ \
+    __volatile__("rdtsc" : "=a" (low), "=d" (high))
+
+unsigned long long get_cycles()
+{
+    unsigned low, high;
+    unsigned long long val;
+    rdtsc(low,high);
+    val = high;
+    val = (val << 32) | low; //将 low 和 high 合成一个 64 位值
+    return val;
+}
+
+double mhz = 2128.054 * 1000;  // 核的频率，在/proc/cpuinfo中找
+
+
+
 int main(int argc, char *argv[])
 {
     google::InitGoogleLogging(argv[0]);
@@ -33,14 +50,20 @@ int main(int argc, char *argv[])
     vector<string> tokens;
     boost::split(tokens, query, boost::is_any_of(" "));
 
-    //Sampler sampler(&model, alpha, 0.0);
-    //LdaInfer infer(model_file, alpha, 0.0);
-    LDAQueryExtend lda_query_extender(model_file, alpha, 0.0); 
+    LDAQueryExtend lda_query_extender(model_file, alpha, 0.0, 10, 50); 
     unordered_map<string, double> extended_query;
+
+    long long start, end;
+    start = get_cycles();
     lda_query_extender.ExtendQuery(tokens, &extended_query); 
+    end = get_cycles();
+    double millisecond = (end - start) / mhz;
+
+    cout<<"cost "<<millisecond<<" ms"<<endl;
     cout<<"------ extended query --------"<<endl;    
     vector<pair<string, double> > rst(extended_query.begin(), extended_query.end());
     sort(rst.begin(), rst.end(), cmper()); 
     cout<<rst<<endl;
+    
     return 0;
 }

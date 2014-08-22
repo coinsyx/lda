@@ -21,33 +21,25 @@ using tr1::unordered_map;
 typedef unordered_map<int, double>  TopicCountDist;
 typedef pair<int, double> TopicCountPair;
 
+
+template<typename KeyType>
+inline void IncreaseKeyCount(unordered_map<KeyType, double>* topic_dist, KeyType topic_id, double count)
+{
+    if (topic_dist->find(topic_id) != topic_dist->end())
+        (*topic_dist)[topic_id] += count;
+    else
+        (*topic_dist)[topic_id] = count;
+}
+
 struct Document
 {
-    vector<string> _string_document;
-    vector<int> _document;
-    vector<int> _topic;
-    TopicCountDist _topic_dist;    
-    vector<string> _unknown_word;
-    string document_output_string()
-    {
-        string output;
-        char buf[100];
-        for (size_t i = 0; i < _document.size(); ++i)
-        {
-            snprintf(buf, sizeof(buf), "%d:%d ", _document[i], _topic[i]);
-            output += buf;
-        }
-        return output;
-    }
+    vector<string> _string_document;  // word_string vector
+    vector<int> _document;            // word_id vector
+    vector<int> _topic;               // corresponding topic id
+    TopicCountDist _topic_dist;       // topic count in document
+    TopicCountDist _accumulate_topic_dist;  // accumulated topic count since after burn-in
+    vector<string> _unknown_word;     // words unseen by model
 };
-
-void print_topic_count_dist(const TopicCountDist& topic_count_dist)
-{
-    for (TopicCountDist::const_iterator iter = topic_count_dist.begin();
-         iter != topic_count_dist.end();
-         ++iter)
-        cout<<"topic_id:"<<iter->first<<" : "<<iter->second<<endl;
-}
 
 class Model {
 public:
@@ -81,7 +73,6 @@ public:
                 {
                     int size = _word2id_dict.size();
                     _word2id_dict[word] = size;
-                    _id2word_dict[size] = word;
                 } 
                 int word_id = _word2id_dict[word];
                 if (_wor2top.find(word_id) == _wor2top.end())
@@ -124,11 +115,6 @@ public:
         return &_word2id_dict;
     }
 
-    inline ID2WordDict* GetID2WordDict()
-    {
-        return &_id2word_dict;
-    }
-
     ~Model()
     {    
         for (WordTopicCountDist::iterator iter = _wor2top.begin();
@@ -144,7 +130,6 @@ private:
     WordTopicCountDist _wor2top;
     TopicCountDist _top_total;
     Word2IDDict _word2id_dict;
-    ID2WordDict _id2word_dict;
 };
 
 
@@ -152,50 +137,55 @@ private:
 
 class LdaInfer {
 public:
-    LdaInfer(string model_file, double alpha, double beta) 
-    : _model(model_file), _alpha(alpha), _beta(beta)
+    LdaInfer(string model_file, double alpha, double beta, int burnin_iter, int max_iter) 
+    : _model(model_file), _alpha(alpha), _beta(beta), _burnin_iter(burnin_iter), _max_iter(max_iter)
     {    _num_topic = _model.GetTopicNum(); }
 
-    //void Infer(const vector<string>& string_doc, int max_iter, vector<pair<string, int> >* word_topic)
-    void Infer(const vector<string>& string_doc, int max_iter, Document* doc)
+    void Infer(const vector<string>& string_doc, Document* doc)
     {
         //Document doc;
         InitTopicAssignment(string_doc, doc);
         if (doc->_document.size() == 0)  return;
 
-        for (int iter = 0; iter < max_iter; ++iter)
+        TopicCountDist& accumulate_topic_dist = doc->_accumulate_topic_dist;
+        for (int n = 0; n < _max_iter; ++n)
         {
             UpdateTopicForDocument(doc);
+            //accumulate topic count
+            if ( n >= _burnin_iter)
+            {
+                for (TopicCountDist::iterator iter = doc->_topic_dist.begin();
+                     iter != doc->_topic_dist.end();
+                     ++iter)
+                {
+                    IncreaseKeyCount(&(doc->_accumulate_topic_dist), iter->first, iter->second);
+                }
+            }
         }
+
+        int accumulate_count = _max_iter - _burnin_iter;
+        int doc_len = doc->_document.size();
+        for (TopicCountDist::iterator iter = accumulate_topic_dist.begin();
+             iter != accumulate_topic_dist.end();
+             ++iter)
+            iter->second /= (accumulate_count * doc_len);
     }
 
 private:
     void UpdateTopicForDocument(Document* doc)
     {
-        //cout<<"-------------------------------------------------------"<<endl;
-        //LOG(INFO)<<"Before Update Topic: "<<doc->document_output_string()<<endl;
-        //print_topic_count_dist(doc->_topic_dist);
-        //cout<<"-------------------------------------------------------"<<endl;
-
         int doc_size = doc->_document.size();
         for (size_t i = 0; i < doc_size; ++i)
         {
-            int old_topic_id = doc->_topic[i];
+            // calculate topic posterior
             TopicCountDist topic_count_dist;
             CalcTopicPosterior(i, doc, &topic_count_dist);
+            // sample from topic distribution
             int sampled_topic = SampleTopic(&topic_count_dist);
-            //LOG(INFO)<<"word "<<doc->_document[i]<<" sampled topic is "<<sampled_topic<<endl;
             // update topic assignment
+            IncreaseKeyCount(&(doc->_topic_dist), doc->_topic[i], -1);
             doc->_topic[i] = sampled_topic;
-            TopicCountDist& topic_dist = doc->_topic_dist;
-            if (topic_dist.find(sampled_topic) == topic_dist.end())
-            {
-                topic_dist[sampled_topic] = 1;
-            }
-            else {
-                topic_dist[sampled_topic] += 1;
-            }
-            topic_dist[old_topic_id] -= 1;
+            IncreaseKeyCount(&(doc->_topic_dist), sampled_topic, 1);
         }
     }
 
@@ -221,9 +211,6 @@ private:
            doc_topic_count -= adjust;
            
            (*topic_count_dist)[topic_id] = p_w_z * (doc_topic_count + _alpha);
-           //cout<<"+++posterior topic:"<<topic_id
-           //    <<" prob:"<<(*topic_count_dist)[topic_id]
-           //    <<" p_w_z:"<<p_w_z<<"  p_z:"<<(doc_topic_count + _alpha)<<endl;
         }
     }
 
@@ -255,26 +242,28 @@ private:
             int random_topic = static_cast<int>( rand() / static_cast<double>(RAND_MAX) * _num_topic);
             doc->_topic.push_back(random_topic);
 
-            if (doc->_topic_dist.find(random_topic) == doc->_topic_dist.end())
-                doc->_topic_dist[random_topic] = 1.0;
-            else
-                doc->_topic_dist[random_topic] ++;
+            IncreaseKeyCount(&(doc->_topic_dist), random_topic, 1);
+            //if (doc->_topic_dist.find(random_topic) == doc->_topic_dist.end())
+            //    doc->_topic_dist[random_topic] = 1.0;
+            //else
+            //    doc->_topic_dist[random_topic] ++;
         }
     }
 
 private:
-    //Sampler _sampler; 
     Model _model;
     int _num_topic;
     double _alpha;
     double _beta;
+    int _max_iter;
+    int _burnin_iter;
 };
 
 class LDAQueryExtend {
 public:
     typedef pair<string, double> WordProb;
-    LDAQueryExtend(const string& model_file, double alpha, double beta)
-    : _infer(model_file, alpha, beta), _topic2word(6000)
+    LDAQueryExtend(const string& model_file, double alpha, double beta, int burnin_iter, int max_iter)
+    : _infer(model_file, alpha, beta, burnin_iter, max_iter), _topic2word(6000)
     {
         ifstream ifs(model_file.c_str());
         string buf;
@@ -310,23 +299,21 @@ public:
     void ExtendQuery(const vector<string>& tokens, unordered_map<string, double>* extended_query)
     {
         Document doc;
-        _infer.Infer(tokens, 20, &doc);
+        _infer.Infer(tokens, &doc);
+        build_extended_query(doc, extended_query);
 
-        // get topic word distribution 
-        TopicCountDist topic_dist;  
-        int sz = doc._document.size();
-        for (size_t i=0; i<sz; ++i)
-        {
-            int topic_id = doc._topic[i];
-            if (topic_dist.find(topic_id) == topic_dist.end())
-                topic_dist[topic_id] = 1.0/sz;
-            else
-                topic_dist[topic_id] += 1.0/sz;
-        }
+        cout<<"------ topic distribution -------"<<endl;
+        for (TopicCountDist::iterator iter = doc._accumulate_topic_dist.begin();
+             iter != doc._accumulate_topic_dist.end();
+             ++iter)
+            if (iter->second > 1e-4) cout<<iter->first<<":"<<iter->second<<endl;
+        cout<<"---------------------------------"<<endl;
+    }
 
-
+    void build_extended_query(Document& doc, unordered_map<string, double>* extended_query)
+    {
         double topic_dist_weight = 0.5;
-
+        TopicCountDist& topic_dist = doc._accumulate_topic_dist;
         // extend query
         for (TopicCountDist::iterator iter = topic_dist.begin();
              iter != topic_dist.end();
@@ -334,29 +321,31 @@ public:
         {
             int topic_id = iter->first;
             double prob_topic = iter->second;
-            
+            if (prob_topic < 1e-4)  continue; // skip unlikely topic 
             vector<WordProb>& one_topic = _topic2word[topic_id];
             int topic_word_size = one_topic.size();
             for (size_t i=0; i<topic_word_size; ++i)
             {
                 const string& word = one_topic[i].first;
                 double prob_topic2word = one_topic[i].second;
-                if (extended_query->find(word) == extended_query->end())
-                    (*extended_query)[word] = prob_topic * prob_topic2word * topic_dist_weight;
-                else
-                    (*extended_query)[word] += prob_topic * prob_topic2word * topic_dist_weight;
+                IncreaseKeyCount(extended_query, word, prob_topic * prob_topic2word * topic_dist_weight);
             }
         }
 
-        // modify orignal query weight
-        sz = tokens.size();
+        // modify orignal query weight, known words
+        int sz = doc._string_document.size();
+        int doc_len = doc._string_document.size() + doc._unknown_word.size();
         for (size_t i=0; i<sz; ++i)
         {
-            const string& word = tokens[i];
-            if (extended_query->find(word) == extended_query->end())
-                (*extended_query)[word] = 1.0 / sz * (1-topic_dist_weight); 
-            else
-                (*extended_query)[word] += 1.0 / sz * (1-topic_dist_weight);
+            const string& word = doc._string_document[i];
+            IncreaseKeyCount(extended_query, word, 1.0 / doc_len * (1-topic_dist_weight));
+        }
+        // modify orignal query weight, known words
+        sz = doc._unknown_word.size();
+        for (size_t i=0; i<sz; ++i)
+        {
+            const string& word = doc._unknown_word[i];
+            IncreaseKeyCount(extended_query, word, 1.0 / doc_len * (1-topic_dist_weight));
         }
     }
 
